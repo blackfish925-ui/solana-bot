@@ -43,73 +43,56 @@ app.post("/webhook", async (req, res) => {
 });
 
 async function handleTransaction(event) {
-  const { signature, type, tokenTransfers, nativeTransfers, feePayer, timestamp } = event;
+  const { signature, type, tokenTransfers, feePayer } = event;
   if (!signature) return;
+
+  // Only process DEX swaps — ignore transfers and all other transaction types
+  if (type !== "SWAP") return;
+  if (!tokenTransfers || tokenTransfers.length < 2) return;
 
   // Find which tracked wallet triggered this
   const wallet = TRACKED_WALLETS.find(w =>
     feePayer === w.address ||
-    (nativeTransfers || []).some(t => t.fromUserAccount === w.address || t.toUserAccount === w.address) ||
     (tokenTransfers || []).some(t => t.fromUserAccount === w.address || t.toUserAccount === w.address)
   );
 
   const walletLabel = wallet ? wallet.label : shortenAddress(feePayer);
-  const txTime = timestamp ? new Date(timestamp * 1000).toUTCString() : "now";
 
-  let embed = null;
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-  // ── SWAP / DEX trade ──
-  if (type === "SWAP" && tokenTransfers && tokenTransfers.length >= 2) {
-    const sold = tokenTransfers.find(t => t.fromUserAccount === feePayer);
-    const bought = tokenTransfers.find(t => t.toUserAccount === feePayer);
+  // The token being removed from the wallet (sold) and added to the wallet (bought)
+  const sold = tokenTransfers.find(t => t.fromUserAccount === feePayer);
+  const bought = tokenTransfers.find(t => t.toUserAccount === feePayer);
 
-    if (sold && bought) {
-      const soldAmt = formatAmount(sold.tokenAmount);
-      const boughtAmt = formatAmount(bought.tokenAmount);
-      const soldSym = sold.mint === "So11111111111111111111111111111111111111112" ? "SOL" : shortenMint(sold.mint);
-      const boughtSym = bought.mint === "So11111111111111111111111111111111111111112" ? "SOL" : shortenMint(bought.mint);
+  if (!sold || !bought) return;
 
-      embed = {
-        title: "🟢  SWAP DETECTED",
-        color: 0x1db954,
-        fields: [
-          { name: "Wallet", value: `**${walletLabel}** (`+shortenAddress(feePayer)+`)`, inline: false },
-          { name: "Sold", value: `${soldAmt} ${soldSym}`, inline: true },
-          { name: "Bought", value: `${boughtAmt} ${boughtSym}`, inline: true },
-          { name: "Time", value: txTime, inline: false },
-          { name: "Transaction", value: `[View on Solscan](https://solscan.io/tx/${signature})`, inline: false },
-        ],
-        footer: { text: "The Trading Room • Wallet Tracker" },
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
+  const soldMint = sold.mint;
+  const boughtMint = bought.mint;
 
-  // ── SOL Transfer ──
-  if (!embed && type === "TRANSFER" && nativeTransfers && nativeTransfers.length > 0) {
-    const transfer = nativeTransfers[0];
-    const lamports = transfer.amount || 0;
-    const sol = (lamports / 1e9).toFixed(4);
-    const direction = transfer.toUserAccount === feePayer ? "RECEIVED" : "SENT";
-    const color = direction === "RECEIVED" ? 0x378add : 0xe24b4a;
+  // Determine BUY vs SELL: if the wallet is receiving a non-SOL token it's a BUY,
+  // if it's sending a non-SOL token it's a SELL.
+  const isBuy = boughtMint !== SOL_MINT;
+  const action = isBuy ? "BUY" : "SELL";
 
-    embed = {
-      title: direction === "RECEIVED" ? "📥  SOL RECEIVED" : "📤  SOL SENT",
-      color,
-      fields: [
-        { name: "Wallet", value: `**${walletLabel}** (`+shortenAddress(feePayer)+`)`, inline: false },
-        { name: "Amount", value: `${sol} SOL`, inline: true },
-        { name: direction === "RECEIVED" ? "From" : "To", value: shortenAddress(direction === "RECEIVED" ? transfer.fromUserAccount : transfer.toUserAccount), inline: true },
-        { name: "Transaction", value: `[View on Solscan](https://solscan.io/tx/${signature})`, inline: false },
-      ],
-      footer: { text: "The Trading Room • Wallet Tracker" },
-      timestamp: new Date().toISOString(),
-    };
-  }
+  // The "interesting" token is the non-SOL side of the trade
+  const tokenMint = isBuy ? boughtMint : soldMint;
+  const tokenAmount = isBuy ? formatAmount(bought.tokenAmount) : formatAmount(sold.tokenAmount);
+  const tokenSymbol = tokenMint === SOL_MINT ? "SOL" : shortenMint(tokenMint);
 
-  if (embed) {
-    await sendDiscordAlert(embed);
-  }
+  const embed = {
+    title: isBuy ? "🟢  BUY" : "🔴  SELL",
+    color: isBuy ? 0x1db954 : 0xe24b4a,
+    fields: [
+      { name: "Wallet", value: walletLabel, inline: true },
+      { name: "Action", value: action, inline: true },
+      { name: "Token", value: `${tokenAmount} ${tokenSymbol}`, inline: true },
+      { name: "Transaction", value: `[View on Solscan](https://solscan.io/tx/${signature})`, inline: false },
+    ],
+    footer: { text: "The Trading Room • Wallet Tracker" },
+    timestamp: new Date().toISOString(),
+  };
+
+  await sendDiscordAlert(embed);
 }
 
 async function sendDiscordAlert(embed) {
