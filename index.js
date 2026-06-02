@@ -19,17 +19,25 @@ const TRACKED_WALLETS = [
 ];
 // ──────────────────────────────────────────
 
+// Health check — keeps Railway happy and confirms the app is alive
+app.get("/", (req, res) => {
+  res.status(200).json({ status: "ok", service: "solana-wallet-tracker" });
+});
+
 // Helius sends a POST here whenever a tracked wallet transacts
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // Acknowledge immediately
   const events = req.body;
-  if (!Array.isArray(events)) return;
+  if (!Array.isArray(events)) {
+    console.error("Webhook received non-array body:", typeof req.body, req.body);
+    return;
+  }
 
   for (const event of events) {
     try {
       await handleTransaction(event);
     } catch (e) {
-      console.error("Error handling event:", e.message);
+      console.error("Error handling event:", e.message, e.stack);
     }
   }
 });
@@ -131,4 +139,25 @@ function formatAmount(amount) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Wallet tracker running on port ${PORT}`));
+try {
+  app.listen(PORT, () => {
+    console.log(`✅ Wallet tracker running on port ${PORT}`);
+  }).on("error", (err) => {
+    console.error("❌ Server failed to start:", err.message, err.stack);
+    process.exit(1);
+  });
+} catch (err) {
+  console.error("❌ Fatal error starting server:", err.message, err.stack);
+  process.exit(1);
+}
+
+// ─── PROCESS-LEVEL ERROR GUARDS ───────────
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught exception:", err.message, err.stack);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled promise rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
