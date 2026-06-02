@@ -42,8 +42,53 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+async function fetchTokenMetadata(mint) {
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+  // Native SOL — no on-chain metadata account needed
+  if (mint === SOL_MINT) {
+    return {
+      symbol: "SOL",
+      name: "Solana",
+      image: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
+    };
+  }
+
+  try {
+    // Metaplex Digital Asset Standard (DAS) — getAsset is available on the
+    // public mainnet RPC and returns symbol, name, and image in one call.
+    const response = await fetch("https://api.mainnet-beta.solana.com", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "wallet-tracker",
+        method: "getAsset",
+        params: { id: mint },
+      }),
+    });
+
+    if (!response.ok) throw new Error(`RPC HTTP ${response.status}`);
+
+    const { result } = await response.json();
+    if (!result) throw new Error("No result from getAsset");
+
+    const symbol = result.content?.metadata?.symbol?.trim() || shortenMint(mint);
+    const name   = result.content?.metadata?.name?.trim()   || symbol;
+    const image  = result.content?.links?.image
+                || result.content?.files?.[0]?.uri
+                || null;
+
+    return { symbol, name, image };
+  } catch (err) {
+    console.warn(`⚠️  Metadata fetch failed for ${mint}: ${err.message}`);
+    // Graceful fallback — shortened mint so the notification still fires
+    return { symbol: shortenMint(mint), name: shortenMint(mint), image: null };
+  }
+}
+
 async function handleTransaction(event) {
-  const { signature, type, tokenTransfers, feePayer } = event;
+  const { signature, type, tokenTransfers, nativeTransfers, feePayer } = event;
   if (!signature) return;
 
   // Only process DEX swaps — ignore transfers and all other transaction types
@@ -61,31 +106,60 @@ async function handleTransaction(event) {
   const SOL_MINT = "So11111111111111111111111111111111111111112";
 
   // The token being removed from the wallet (sold) and added to the wallet (bought)
-  const sold = tokenTransfers.find(t => t.fromUserAccount === feePayer);
-  const bought = tokenTransfers.find(t => t.toUserAccount === feePayer);
+  const sold   = tokenTransfers.find(t => t.fromUserAccount === feePayer);
+  const bought = tokenTransfers.find(t => t.toUserAccount   === feePayer);
 
   if (!sold || !bought) return;
 
-  const soldMint = sold.mint;
+  const soldMint   = sold.mint;
   const boughtMint = bought.mint;
 
-  // Determine BUY vs SELL: if the wallet is receiving a non-SOL token it's a BUY,
-  // if it's sending a non-SOL token it's a SELL.
+  // Determine BUY vs SELL: receiving a non-SOL token → BUY, sending one → SELL
   const isBuy = boughtMint !== SOL_MINT;
-  const action = isBuy ? "BUY" : "SELL";
 
-  // The "interesting" token is the non-SOL side of the trade
-  const tokenMint = isBuy ? boughtMint : soldMint;
+  // The non-SOL token is the "interesting" side; the SOL side is the price paid/received
+  const tokenMint   = isBuy ? boughtMint : soldMint;
   const tokenAmount = isBuy ? formatAmount(bought.tokenAmount) : formatAmount(sold.tokenAmount);
-  const tokenSymbol = tokenMint === SOL_MINT ? "SOL" : shortenMint(tokenMint);
+
+  // ── SOL amount ──────────────────────────────────────────────────────────────
+  // Helius provides nativeTransfers (in lamports). Sum all lamports flowing
+  // toward the wallet (buys receive SOL back as change; sells receive SOL).
+  // For buys the wallet sends SOL, so we sum outgoing lamports from feePayer.
+  let solAmount = "?";
+  if (Array.isArray(nativeTransfers) && nativeTransfers.length > 0) {
+    if (isBuy) {
+      // SOL leaving the wallet
+      const lamports = nativeTransfers
+        .filter(t => t.fromUserAccount === feePayer)
+        .reduce((sum, t) => sum + (t.amount || 0), 0);
+      if (lamports > 0) solAmount = formatSol(lamports);
+    } else {
+      // SOL arriving at the wallet
+      const lamports = nativeTransfers
+        .filter(t => t.toUserAccount === feePayer)
+        .reduce((sum, t) => sum + (t.amount || 0), 0);
+      if (lamports > 0) solAmount = formatSol(lamports);
+    }
+  }
+
+  // ── Token metadata ──────────────────────────────────────────────────────────
+  const tokenMeta = await fetchTokenMetadata(tokenMint);
+  const tokenSymbol = tokenMeta.symbol;
+  const tokenName   = tokenMeta.name;
+  const tokenImage  = tokenMeta.image;
+
+  // ── Trade description ───────────────────────────────────────────────────────
+  const tradeDescription = isBuy
+    ? `Spent **${solAmount} SOL** for **${tokenAmount} ${tokenSymbol}**`
+    : `Sold **${tokenAmount} ${tokenSymbol}** for **${solAmount} SOL**`;
 
   const embed = {
-    title: isBuy ? "🟢  BUY" : "🔴  SELL",
+    title: isBuy ? `🟢  BUY — ${tokenName}` : `🔴  SELL — ${tokenName}`,
     color: isBuy ? 0x1db954 : 0xe24b4a,
+    thumbnail: tokenImage ? { url: tokenImage } : undefined,
     fields: [
-      { name: "Wallet", value: walletLabel, inline: true },
-      { name: "Action", value: action, inline: true },
-      { name: "Token", value: `${tokenAmount} ${tokenSymbol}`, inline: true },
+      { name: "Wallet",      value: walletLabel,       inline: true  },
+      { name: "Trade",       value: tradeDescription,  inline: false },
       { name: "Transaction", value: `[View on Solscan](https://solscan.io/tx/${signature})`, inline: false },
     ],
     footer: { text: "The Trading Room • Wallet Tracker" },
@@ -119,6 +193,14 @@ function formatAmount(amount) {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(2) + "K";
   return n.toFixed(4);
+}
+
+// Convert lamports (integer) to a human-readable SOL string
+function formatSol(lamports) {
+  const sol = lamports / 1_000_000_000;
+  if (sol >= 1_000) return sol.toFixed(2) + "K";
+  if (sol >= 1)     return sol.toFixed(4);
+  return sol.toFixed(6);
 }
 
 const PORT = process.env.PORT || 3000;
