@@ -28,6 +28,7 @@ app.get("/", (req, res) => {
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // Acknowledge immediately
   const events = req.body;
+  console.log(`📨 Webhook received: ${Array.isArray(events) ? events.length : 0} event(s)`);
   if (!Array.isArray(events)) {
     console.error("Webhook received non-array body:", typeof req.body, req.body);
     return;
@@ -57,6 +58,9 @@ async function fetchTokenMetadata(mint) {
   try {
     // Metaplex Digital Asset Standard (DAS) — getAsset is available on the
     // public mainnet RPC and returns symbol, name, and image in one call.
+    const controller = new AbortController();
+    const metadataTimeout = setTimeout(() => controller.abort(), 5000);
+
     const response = await fetch("https://api.mainnet-beta.solana.com", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -66,7 +70,8 @@ async function fetchTokenMetadata(mint) {
         method: "getAsset",
         params: { id: mint },
       }),
-    });
+      signal: controller.signal,
+    }).finally(() => clearTimeout(metadataTimeout));
 
     if (!response.ok) throw new Error(`RPC HTTP ${response.status}`);
 
@@ -175,7 +180,11 @@ async function sendDiscordAlert(embed) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ embeds: [embed] }),
   });
-  if (!res.ok) console.error("Discord webhook failed:", res.status);
+  if (res.ok) {
+    console.log(`✅ Discord alert sent: ${embed.title}`);
+  } else {
+    console.error("Discord webhook failed:", res.status);
+  }
 }
 
 function shortenAddress(addr) {
