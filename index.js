@@ -13,7 +13,7 @@ app.use(express.json());
 const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1511263852476498000/BLW0OaNdjWR7a7g6h0LkQUACfM6_LLFj6wM_ptyirKB8Hq7rkeHrsDqj276mh6DTr5DM";
 const TRACKED_WALLETS = [
   {
-    "address": "yA1ixWVyfd4BcFL71PGT7UAjNRW8ireS6f7x9VAAsAE",
+    "address": "AQ45HqCk5uKNFD7LS7sumRs91G3XbscB4zjg1pxMW7A9",
     "label": "wanka wahale"
   }
 ];
