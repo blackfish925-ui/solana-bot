@@ -119,8 +119,10 @@ async function handleTransaction(event) {
   const soldMint   = sold.mint;
   const boughtMint = bought.mint;
 
-  // Determine BUY vs SELL: receiving a non-SOL token → BUY, sending one → SELL
-  const isBuy = boughtMint !== SOL_MINT;
+  // Determine BUY vs SELL:
+  //   BUY  = wallet sends SOL and receives a token (soldMint is SOL)
+  //   SELL = wallet sends a token and receives SOL (soldMint is not SOL)
+  const isBuy = soldMint === SOL_MINT;
 
   // The non-SOL token is the "interesting" side; the SOL side is the price paid/received
   const tokenMint   = isBuy ? boughtMint : soldMint;
